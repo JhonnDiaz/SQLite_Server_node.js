@@ -64,6 +64,63 @@ app.get('/productos', (req, res) => {
     });
 });
 
+app.get('/metodo_pago', (req, res) => {
+    const { nombre, tipo } = req.query;
+
+    let query = 'SELECT * FROM Metodos_Pago';
+    const params = [];
+
+    if (nombre || tipo) {
+        query += ' WHERE';
+        if (nombre) {
+            query += ' Nombre LIKE ?';
+            params.push(`%${nombre}%`);
+        }
+        if (tipo) {
+            query += nombre ? ' AND' : '';
+            query += ' tipo = ?';
+            params.push(tipo);
+        }
+    }
+
+    db.all(query, params, (err, rows) => {
+        if (err) {
+            res.status(500).json({ error: err.message });
+        } else {
+            res.json(rows);
+        }
+    });
+});
+
+// Ruta para eliminar un método de pago
+app.delete('/metodos_pago/:id', (req, res) => {
+    const { id } = req.params;
+
+    if (!id) {
+        return res.status(400).json({ error: 'Debe proporcionar un ID válido para eliminar.' });
+    }
+
+    // Eliminar el registro de la base de datos
+    db.run(
+        'DELETE FROM Metodos_Pago WHERE Metodo_Pago_ID = ?',
+        [id],
+        function (err) {
+            if (err) {
+                return res.status(500).json({ error: 'Error al eliminar el método de pago.' });
+            }
+
+            if (this.changes === 0) {
+                // Si no se encontraron filas para eliminar
+                return res.status(404).json({ message: 'Método de pago no encontrado.' });
+            }
+
+            res.status(200).json({ message: 'Método de pago eliminado exitosamente.' });
+        }
+    );
+});
+
+
+
 // Agregar un nuevo cliente
 app.post('/clientes', (req, res) => {
     const { Nombre, Direccion, Telefono } = req.body;
@@ -84,28 +141,32 @@ app.post('/clientes', (req, res) => {
 
 // Ruta para el registro de usuarios
 app.post('/register', (req, res) => {
+    console.log('Datos recibidos:', req.body);
     const { email, password, name, direccion, telefono } = req.body;
+    console.log('Campos:', email, password, name, direccion, telefono);
 
+    // Asegúrate de que estas variables están bien definidas
+    console.log("Datos recibidos:", { email, password, name, direccion, telefono });
 
     // Validar si el email ya está registrado
-    db.get('SELECT * FROM Clientes WHERE Email = ?', [email], (err, row) => {
+    db.get('SELECT * FROM Clientes WHERE Email = ? AND Estado=true', [email], (err, row) => {
         if (err) {
             res.status(500).json({ error: 'Error al buscar el correo electrónico.' });
         } else if (row) {
             res.status(400).json({ error: 'El correo electrónico ya está registrado.' });
         } else {
             // Validar si la contraseña ya está en uso
-            db.get('SELECT * FROM Clientes WHERE Password = ?', [password], (err, passRow) => {
+            db.get('SELECT * FROM Clientes WHERE Password = ? AND Estado=true', [password], (err, passRow) => {
                 if (err) {
                     res.status(500).json({ error: 'Error al buscar la contraseña.' });
                 } else if (passRow) {
                     res.status(400).json({ error: 'La contraseña ya está en uso. Por favor, elige otra.' });
                 } else {
-                    // Insertar el nuevo cliente en la base de datos sin encriptar la contraseña
+                   
                     db.run(
                         `INSERT INTO Clientes (Nombre, Direccion, Telefono, Password, Email) 
-                        VALUES (?, ?, ?, ?, ?)`,
-                        [nombre, direccion, telefono, password, email],
+                         VALUES (?, ?, ?, ?, ?)`,
+                        [name, direccion, telefono, password, email],  
                         function (err) {
                             if (err) {
                                 res.status(500).json({ error: 'Error al registrar el usuario.' });
@@ -125,6 +186,7 @@ app.post('/register', (req, res) => {
 
 
 
+
 // Ruta para el login de usuarios
 app.get('/login', (req, res) => {
     const { email, password } = req.query; // Usamos query params en lugar de body
@@ -140,6 +202,11 @@ app.get('/login', (req, res) => {
         } else if (!row) {
             return res.status(400).json({ error: 'Credenciales inválidas' });
         } else {
+            // Verificar si el usuario tiene estado "false"
+            if (!row.Estado) {
+                return res.status(403).json({ error: 'El usuario está inactivo y no puede acceder.' });
+            }
+
             // Comparar la contraseña proporcionada con la almacenada en la base de datos
             if (row.Password === password) {
                 // Crear un token JWT
@@ -151,7 +218,9 @@ app.get('/login', (req, res) => {
                         id: row.Cliente_ID,
                         name: row.Nombre,
                         email: row.Email,
-                        phone: row.Telefono, 
+                        phone: row.Telefono,
+                        direccion: row.Direccion,
+                        contraseña: row.Password,
                     }
                 });
             } else {
@@ -216,6 +285,130 @@ app.post('/venta', (req, res) => {
                     return res.status(200).json({ message: 'Venta realizada con éxito', venta_id: venta_id });
                 }
             );
+        }
+    );
+});
+
+// Obtener todas las compras realizadas por un cliente con estado "Pendiente" o "Finalizado"
+app.get('/compras', (req, res) => {
+    const { cliente_id } = req.query;
+
+    // Validar que se proporcione cliente_id
+    if (!cliente_id) {
+        return res.status(400).json({ error: 'Debe proporcionar un Cliente_ID.' });
+    }
+
+    // Consulta SQL con filtro de estado
+    const query = `
+    SELECT 
+        V.Venta_ID,
+        V.Fecha_Venta,
+        V.Estado AS Estado_Venta,
+        P.Nombre AS Producto_Nombre,
+        DV.Cantidad,
+        IV.Subtotal,
+        IV.Descuento,
+        IV.IVA,
+        IV.Total,
+        (SELECT MP.Metodo_Pago 
+         FROM Pagos AS PG 
+         INNER JOIN Metodos_Pago AS MP ON PG.Metodo_Pago_ID = MP.Metodo_Pago_ID
+         WHERE PG.Venta_ID = V.Venta_ID
+         LIMIT 1) AS Metodo_Pago -- Obtener un solo método de pago por venta
+    FROM Ventas AS V
+    INNER JOIN Detalles_Ventas AS DV ON V.Venta_ID = DV.Venta_ID
+    INNER JOIN Productos AS P ON DV.Producto_ID = P.Producto_ID
+    INNER JOIN Info_Venta AS IV ON DV.Detalle_Venta_ID = IV.Detalle_Venta_ID
+    WHERE V.Cliente_ID = ?
+    AND (V.Estado = 'Pendiente' OR V.Estado = 'Finalizado')
+`;
+
+
+    // Ejecutar la consulta SQL
+    db.all(query, [cliente_id], (err, rows) => {
+        if (err) {
+            console.error('Error al ejecutar la consulta:', err.message);
+            return res.status(500).json({ error: 'Error al obtener las compras del cliente.' });
+        }
+
+        // Validar si se encontraron resultados
+        if (rows.length === 0) {
+            return res.status(404).json({ message: 'No se encontraron compras pendientes o aprobadas para este cliente.' });
+        }
+
+        // Devolver los resultados
+        res.json(rows);
+    });
+});
+
+// Cambiar el estado de una venta a "Cancelada"
+app.patch('/ventas/:venta_id/cancelar', (req, res) => {
+    const { venta_id } = req.params;
+
+    if (!venta_id) {
+        return res.status(400).json({ error: 'Debe proporcionar un ID de venta válido.' });
+    }
+
+    // Verificar si la venta existe antes de actualizar
+    db.get('SELECT * FROM Ventas WHERE Venta_ID = ?', [venta_id], (err, venta) => {
+        if (err) {
+            return res.status(500).json({ error: 'Error al buscar la venta.' });
+        }
+
+        if (!venta) {
+            return res.status(404).json({ error: 'Venta no encontrada.' });
+        }
+
+        if (venta.Estado === 'Cancelada') {
+            return res.status(400).json({ error: 'La venta ya está cancelada.' });
+        }
+
+        // Actualizar el estado de la venta a "Cancelada"
+        db.run(
+            'UPDATE Ventas SET Estado = ? WHERE Venta_ID = ?',
+            ['Cancelada', venta_id],
+            function (err) {
+                if (err) {
+                    return res.status(500).json({ error: 'Error al cancelar la venta.' });
+                }
+
+                if (this.changes === 0) {
+                    return res.status(404).json({ error: 'No se pudo cancelar la venta. Verifique el ID.' });
+                }
+
+                res.json({ message: 'Venta cancelada con éxito.', venta_id });
+            }
+        );
+    });
+});
+
+// Cambiar el estado de un cliente (activo/inactivo)
+app.patch('/clientes/:id/estado', (req, res) => {
+    const { id } = req.params;  // Obtener el ID del cliente desde los parámetros de la URL
+    const { estado } = req.body;  // Obtener el estado desde el cuerpo de la solicitud
+
+    // Validar que el estado sea un booleano
+    if (typeof estado !== 'boolean') {
+        return res.status(400).json({ error: 'El estado debe ser un valor booleano (true o false).' });
+    }
+
+    // Ejecutar la consulta SQL para actualizar el estado del cliente
+    db.run(
+        'UPDATE Clientes SET Estado = ? WHERE Cliente_ID = ?',  // SQL para actualizar el estado
+        [estado, id],  // Parametros: el nuevo estado y el ID del cliente
+        function (err) {
+            if (err) {
+                // Si hay un error en la ejecución del query
+                return res.status(500).json({ error: 'Error al actualizar el estado del cliente.' });
+            }
+
+            if (this.changes === 0) {
+                // Si no se encontraron filas para actualizar (el cliente no existe)
+                return res.status(404).json({ error: 'Cliente no encontrado.' });
+            }
+
+            // Si todo salió bien, devolver la respuesta exitosa
+            res.json({ message: 'Estado del cliente actualizado con éxito.', cliente_id: id });
         }
     );
 });
